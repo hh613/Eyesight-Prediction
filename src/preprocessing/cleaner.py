@@ -5,7 +5,7 @@ from src.preprocessing import mapper
 class DataCleaner:
     def __init__(self, config=None):
         self.config = config or {}
-        # 默认阈值设置
+        #设置默认阈值
         self.missing_threshold = 0.8
         self.min_interval_months = 5
         self.valid_corrections = ['不戴镜', '框架眼镜']
