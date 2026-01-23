@@ -51,13 +51,13 @@ def main():
         print(f"特征工程完成。数据已保存至 {feature_output_path}")
         
         # 展示样本
-        print("\n最终数据样本:")
+        print("\n最终数据样本 (Cleaned):")
         # 展示关键列
-        key_cols = ['student_id', 'check_date', 'age', 'delta_t', 'SE_right', 'school_type', 'has_glasses', 'correct_level']
+        key_cols = ['student_id', 'check_date', 'delta_t', 'SE_right', 'gender', 'has_glasses']
         existing_cols = [c for c in key_cols if c in featured_df.columns]
         print(featured_df[existing_cols].head(10))
         print(f"\n数据形状: {featured_df.shape}")
-        
+
     except Exception as e:
         print(f"预处理过程中发生错误: {e}")
         import traceback
