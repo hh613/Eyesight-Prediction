@@ -51,12 +51,12 @@ class LSTMMultivariateBaseline:
         self.feature_cols = [c for c in self.config.columns.timevarying_cols if c != self.target_col]
         self.input_size = 1 + len(self.feature_cols) # y + features
         
-        self.hidden_size = 64
-        self.num_layers = 2
-        self.epochs = 20
-        self.lr = 0.001
-        self.batch_size = 64
-        self.window_size = 3
+        self.hidden_size = config.lstm.hidden_size
+        self.num_layers = config.lstm.num_layers
+        self.epochs = config.lstm.epochs
+        self.lr = config.lstm.learning_rate
+        self.batch_size = config.lstm.batch_size
+        self.window_size = config.lstm.window_size
         
         self.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
         logger.info(f"LSTM Multivariate 使用设备: {self.device}, 输入维度: {self.input_size}")
@@ -245,6 +245,7 @@ class LSTMMultivariateBaseline:
                     
         pred_df = pd.DataFrame(predictions)
         evaluator = Evaluator(self.config, output_dir)
+        os.makedirs(output_dir, exist_ok=True)
         metrics = evaluator.evaluate(pred_df, save_results=True)
         
         logger.info(f"LSTM Multivariate 完成。Metrics: {metrics['overall']}")

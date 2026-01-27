@@ -31,7 +31,7 @@ class TabularPredictor:
             # 检查是否真的安装了 tabpfn
             import tabpfn
             logger.info("TabPFN 库已检测到。尝试初始化 TabPFNRegressor...")
-            return TabPFNRegressor(device=self.device, N_ensemble_configurations=32)
+            return TabPFNRegressor(device=self.device, N_ensemble_configurations=self.config.tabpfn.N_ensemble_configurations)
             
         except ImportError:
             logger.warning("未安装 TabPFN，回退到 RandomForestRegressor")
@@ -63,22 +63,18 @@ class TabPFNTransitionBaseline:
         # 但是在递归预测时，我们需要动态更新 H_t
         
         # 为了简化，我们假设模型输入的特征列是固定的
-        # target_col 是 y_{t+1} (残差或真实值?)
-        # 题目要求: X_t -> y_{t+1}
-        # 这里的 y_{t+1} 通常指真实值，而不是残差，除非我们显式做残差学习。
-        # 根据 TEM 架构，我们预测的是 Residual。但 Baseline 通常直接预测 y?
-        # 题目: "TabPFN表格（多步时同一 ARIMA-feature-generator + 用模型自身 \hat y 更新历史）"
-        # 并没有明确说是残差。通常 Baseline 是直接预测目标值。
-        # 让我们假设直接预测 target_col。
+        # target_col 是 y_{t+1}
+        # "TabPFN表格（多步时同一 ARIMA-feature-generator + 用模型自身 \hat y 更新历史）"
+        # 直接预测 target_col。
         
         self.target_col = self.config.columns.target_col
         self.timevarying_cols = [c for c in self.config.columns.timevarying_cols if c != self.target_col]
         
         # 静态特征
-        self.static_cols = ['gender', 'school_type'] # 假设，应从 config 读取
+        self.static_cols = self.config.columns.static_cols # 假设，应从 config 读取
         
         # 初始化模型
-        self.predictor = TabularPredictor(config, device='cuda' if False else 'cpu') # TabPFN GPU memory heavy
+        self.predictor = TabularPredictor(config, device=config.tabpfn.device)
         
         # ARIMA 生成器
         self.arima_gen = ArimaFeatureGenerator(timevarying_cols=self.timevarying_cols)
@@ -132,23 +128,8 @@ class TabPFNTransitionBaseline:
         grouped = test_df.groupby(pid_col)
         predictions = []
         
-        # 需要计算历史特征 (mean_3, rate_last 等)
-        # 这部分逻辑有点复杂，需要复用 src.core.data 中的特征工程逻辑
-        # 但我们需要在递归循环中动态计算。
-        # 为了避免重复造轮子，我们应该提取特征计算函数。
-        # 暂时简化：假设只用 ARIMA 预测的 V 和上一时刻的 y 作为特征，忽略复杂聚合特征，
-        # 或者 尽最大努力更新那些依赖 lag=1 的特征。
-        
-        # 为了严格符合要求 "用模型自身 \hat y 更新历史"，我们需要重新计算 rolling features。
-        # 这需要一个 FeatureCalculator 类。
-        # 由于时间紧迫，我们这里做一个简化假设：
-        # 特征仅包含 V_t 和 lag_y。
-        # 如果包含 rolling mean，我们需要维护一个历史 buffer。
-        
         from src.core.data import FeatureEngineer
-        # 实例化一个 helper 来计算单行特征
-        # 但 FeatureEngineer 是基于 DataFrame apply 的。
-        # 我们需要在循环中手动计算。
+        self.fe = FeatureEngineer(self.config)
         
         for pid, group in tqdm(grouped, desc="TabPFN Eval"):
             group = group.sort_values(time_col).reset_index(drop=True)
@@ -160,92 +141,92 @@ class TabPFNTransitionBaseline:
                 # 历史直到 t
                 history_df = group.iloc[:t+1].copy()
                 
-                # 1. ARIMA 预测未来 V
+                # 递归预测最大步数
                 max_step = min(horizon, len(group) - 1 - t)
                 if max_step < 1:
                     continue
                     
-                future_V = self.arima_gen.predict_next(history_df, pid_col, steps=max_step)
-                
-                # 2. 递归预测
-                current_history = history_df.copy() # 用于追加预测值以计算特征
+                # 初始化 current_history 为真实历史
+                current_history = history_df.copy()
                 
                 preds = []
                 
                 for k in range(max_step):
-                    # 构造当前时刻 t+k 的特征 X_{t+k}
-                    # 这需要基于 current_history (包含真实 0..t 和 预测 t+1..t+k)
-                    # 并且结合 future_V 的第 k 行
+                    # --- 1. 准备输入特征 X_{T+k} ---
+                    # 取 current_history 的最后一行作为基础
+                    input_row = current_history.iloc[-1]
                     
-                    # 为了复用 DataBuilder 逻辑，我们可能需要调用 FeatureEngineer
-                    # 但这太慢了。
-                    # 我们这里模拟核心特征的计算：
-                    # - SE_right (当前值): 取 current_history.iloc[-1] (即上一时刻的预测值)
-                    # - time varying V: 取 future_V.iloc[k]
-                    # - static: 不变
-                    # - rolling: 基于 current_history 计算
+                    feat_dict = {}
                     
-                    # 这是一个简化的构建过程
-                    last_row = current_history.iloc[-1]
-                    
-                    # 提取基础特征
-                    row_dict = {}
-                    # 静态
-                    for c in self.static_cols:
-                        if c in last_row: row_dict[c] = last_row[c]
+                    # 静态特征
+                    for c in self.config.columns.static_cols:
+                        if c in input_row: feat_dict[c] = input_row[c]
                         
-                    # 时变 (来自 ARIMA)
-                    for c in self.timevarying_cols:
-                        if c in future_V.columns:
-                            row_dict[c] = future_V.iloc[k][c]
-                        else:
-                            row_dict[c] = last_row.get(c, 0) # Fallback
-                            
-                    # 目标 (上一时刻的 y 作为特征? 如果模型需要)
-                    # 我们的模型 X 包含 SE_right (当前状态)。
-                    # 在 dataset.csv 中，SE_right 是 t 时刻的值，用于预测 t+1。
-                    # 所以对于 k=0 (预测 t+1)，输入 SE_right 是真实值 (history[-1])
-                    # 对于 k=1 (预测 t+2)，输入 SE_right 是预测值 \hat y_{t+1}
+                    # 随时间变化列 (Current V)
+                    for c in self.config.columns.timevarying_cols:
+                        if c in input_row: feat_dict[c] = input_row[c]
                     
-                    if k == 0:
-                        prev_y = history_df.iloc[-1][self.target_col]
+                    # 外推特征 (Next V)
+                    # 需要基于 current_history 预测 T+k+1 的特征值
+                    for c in self.config.columns.timevarying_cols:
+                        if c != self.config.columns.target_col:
+                            try:
+                                val_arima = self.arima_gen.predict_next(current_history, c, steps=1)[0]
+                                feat_dict[f"{c}_arima_next"] = val_arima
+                            except:
+                                feat_dict[f"{c}_arima_next"] = 0.0
+
+                    # 动态特征 (Rolling, Rate etc.)
+                    dynamic_feats = self.fe.compute_dynamic_features(current_history)
+                    feat_dict.update(dynamic_feats)
+                    
+                    # Delta t (简化: 假设每年一次或基于平均间隔)
+                    # 也可以尝试用 ARIMA 预测 delta_t，但这里简化为 1.0 (如果单位是年) 或 0.5
+                    # 或者取历史平均 delta_t
+                    if 'delta_t' in self.config.columns.timevarying_cols:
+                        # 如果 delta_t 是特征之一，它已经被处理了
+                        pass 
                     else:
-                        prev_y = preds[-1]
-                        
-                    row_dict[self.target_col] = prev_y # 假设 target_col 也是输入特征之一(自回归)
+                        # 如果需要额外计算 delta_t
+                        feat_dict['delta_t'] = 0.5 # Default placeholder
                     
-                    # 计算 Rolling 特征 (简化: 仅 mean_3)
-                    # current_history 包含了所有之前的 y
-                    # 提取 y 序列
-                    # 注意: current_history 在 k=0 时是纯真实。k>0 时包含预测。
+                    # --- 2. 构造模型输入向量 ---
+                    # 需要转换为 DataFrame 并对齐列
+                    input_df = pd.DataFrame([feat_dict])
+                    input_df = pd.get_dummies(input_df) # One-hot
                     
-                    # 这里我们需要把 row_dict 转为 DataFrame 并进行 One-Hot
-                    # 并且补全所有 feature_cols
-                    
-                    input_df = pd.DataFrame([row_dict])
-                    input_df = pd.get_dummies(input_df)
-                    
-                    # 对齐列
+                    # 对齐列 (补全缺失列，忽略多余列)
                     input_vector = pd.DataFrame(0, index=[0], columns=self.final_feature_cols)
                     for c in input_df.columns:
                         if c in self.final_feature_cols:
                             input_vector[c] = input_df[c]
                             
-                    # 预测
+                    # --- 3. 预测目标 y_{T+k+1} ---
+                    # TabPFN 直接预测 target
                     pred_y = self.predictor.predict(input_vector)[0]
                     preds.append(pred_y)
                     
-                    # 更新 History (追加预测的一行)
-                    # 我们需要把预测的 y 和 V 追加到 history，以便下一步计算 rolling
-                    new_row = last_row.copy()
+                    # --- 4. 更新历史 (为下一步 k+1 做准备) ---
+                    new_row = input_row.copy()
+                    
+                    # 填入预测的目标值
                     new_row[self.target_col] = pred_y
-                    for c in self.timevarying_cols:
-                        new_row[c] = row_dict[c]
                     
-                    # 时间更新 (简单加 1年? 或者用真实时间间隔?)
-                    # 严格来说应该预测时间。这里假设 delta_t 来自真实数据或者固定。
-                    # 简单起见，不更新时间列，因为我们的简化特征计算没用到时间。
+                    # 填入预测的特征值 (Next V 变为 Current V)
+                    # 我们刚才计算了 feat_dict[f"{c}_arima_next"]，这就是下一步的特征值
+                    for c in self.config.columns.timevarying_cols:
+                        if c != self.config.columns.target_col:
+                            key = f"{c}_arima_next"
+                            if key in feat_dict:
+                                new_row[c] = feat_dict[key]
+                                
+                    # 更新时间 (简单递增，防止索引重复或乱序)
+                    # 真实应用中应预测 delta_t
+                    last_time = input_row[time_col]
+                    new_time = last_time + pd.Timedelta(days=180) # 假设半年
+                    new_row[time_col] = new_time
                     
+                    # 追加
                     current_history = pd.concat([current_history, pd.DataFrame([new_row])], ignore_index=True)
 
                 # 记录结果
@@ -263,13 +244,14 @@ class TabPFNTransitionBaseline:
                         'time_pred': time_pred,
                         'y_true': y_true,
                         'y_pred': y_pred,
-                        'y_arima': 0.0,
+                        'y_arima': 0.0, # TabPFN 不使用 ARIMA 基线叠加
                         'residual_pred': 0.0,
                         'future_V_source': 'ARIMA-feature-generator'
                     })
 
         pred_df = pd.DataFrame(predictions)
         evaluator = Evaluator(self.config, output_dir)
+        os.makedirs(output_dir, exist_ok=True)
         metrics = evaluator.evaluate(pred_df, save_results=True)
         
         logger.info(f"TabPFN Baseline 完成。Metrics: {metrics['overall']}")

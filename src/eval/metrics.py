@@ -1,7 +1,7 @@
 import numpy as np
 import pandas as pd
 from typing import Dict, List, Union
-from sklearn.metrics import mean_absolute_error, mean_squared_error
+from sklearn.metrics import mean_absolute_error, mean_squared_error, r2_score
 
 class MetricsCalculator:
     def __init__(self, accuracy_thresholds: List[float] = None):
@@ -26,15 +26,18 @@ class MetricsCalculator:
             return {
                 'mae': np.nan,
                 'rmse': np.nan,
+                'r2': np.nan,
                 **{f'acc_{t:.2f}': np.nan for t in self.accuracy_thresholds}
             }
             
         mae = mean_absolute_error(y_t, y_p)
         rmse = np.sqrt(mean_squared_error(y_t, y_p))
+        r2 = r2_score(y_t, y_p)
         
         metrics = {
             'mae': float(mae),
-            'rmse': float(rmse)
+            'rmse': float(rmse),
+            'r2': float(r2)
         }
         
         errors = np.abs(y_t - y_p)

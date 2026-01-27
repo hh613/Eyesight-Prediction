@@ -143,7 +143,7 @@ class DataBuilder:
                 # 为了防止泄漏，我们使用 [0 ... t] 的数据来预测 t+1
                 history_df = group.iloc[:t_idx+1]
                 
-                # 2. t+1 时刻的 ARIMA 预测
+                # 2. t+1 时刻的 ARIMA 预测 (基于 t 时刻的历史)
                 y_arima = self.arima.predict_next(history_df, self.config.columns.target_col, steps=1)[0]
                 
                 # 3. 构造 X_t 的特征

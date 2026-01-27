@@ -8,6 +8,7 @@ from sklearn.metrics import mean_absolute_error, mean_squared_error
 from src.core.config import Config
 from src.core.model import ResidualRegressor
 from src.experiment.forecast import RecursiveForecaster
+from src.eval.evaluator import Evaluator
 
 logger = logging.getLogger(__name__)
 
@@ -35,9 +36,20 @@ class ExperimentRunner:
             train_pairs = pd.read_csv(train_pairs_path)
             
         # 2. 训练模型
-        logger.info("正在训练残差模型...")
-        X = train_pairs.drop(columns=['residual', 'y_true_next', 'y_arima_next'])
-        y = train_pairs['residual']
+        logger.info(f"正在训练模型 (Target: {self.config.experiment.learning_target})...")
+        
+        if self.config.experiment.learning_target == "direct":
+            # Direct Forecasting: 预测 y_true_next
+            # 我们保留 y_arima_next 作为特征 (Stacking)
+            X = train_pairs.drop(columns=['residual', 'y_true_next'])
+            y = train_pairs['y_true_next']
+        else:
+            # Residual Learning (TEM): 预测 residual
+            # 移除 y_arima_next (因为它用于计算 residual，且在推理时作为基线叠加)
+            # 虽然理论上也可以加进去，但 TEM 原文中通常不加
+            X = train_pairs.drop(columns=['residual', 'y_true_next', 'y_arima_next'])
+            y = train_pairs['residual']
+            
         self.model.fit(X, y)
         
         # 3. 在测试集上评估 (递归)
@@ -116,46 +128,21 @@ class ExperimentRunner:
                     all_preds.append({
                         'person_id': pid,
                         'start_time': group.iloc[t][self.config.columns.time_col],
-                        'step': step,
+                        'horizon': step,
+                        'time_pred': group.iloc[abs_idx][self.config.columns.time_col], # 保持列名一致
                         'y_true': y_true,
                         'y_pred': y_pred,
                         'y_arima': pred_row['y_arima'],
-                        'residual_pred': pred_row['residual_pred'],
-                        'error': err
+                        'residual_pred': pred_row['residual_pred']
                     })
                     
-        # 4. 计算指标
+        # 4. 统一评估
         results_df = pd.DataFrame(all_preds)
         
-        # 保存预测结果
-        pred_out = os.path.join(self.config.experiment.output_dir, 'predictions.csv')
-        results_df.to_csv(pred_out, index=False)
-        logger.info(f"预测结果已保存至 {pred_out}")
-        
-        # 计算聚合指标
-        mae = mean_absolute_error(results_df['y_true'], results_df['y_pred'])
-        rmse = np.sqrt(mean_squared_error(results_df['y_true'], results_df['y_pred']))
-        
-        errors = np.abs(results_df['y_true'] - results_df['y_pred'])
-        acc_050 = (errors <= 0.50).mean()
-        acc_075 = (errors <= 0.75).mean()
-        
-        final_metrics = {
-            'overall_mae': mae,
-            'overall_rmse': rmse,
-            'acc_0.50': acc_050,
-            'acc_0.75': acc_075
-        }
-        
-        # 分步指标 (Step-wise metrics)
-        for step in sorted(results_df['step'].unique()):
-            step_df = results_df[results_df['step'] == step]
-            final_metrics[f'step_{step}_mae'] = mean_absolute_error(step_df['y_true'], step_df['y_pred'])
-            
-        # 保存指标
-        metrics_out = os.path.join(self.config.experiment.output_dir, 'metrics.json')
-        with open(metrics_out, 'w') as f:
-            json.dump(final_metrics, f, indent=4)
+        # 使用统一的 Evaluator
+        evaluator = Evaluator(self.config, self.config.experiment.output_dir)
+        os.makedirs(self.config.experiment.output_dir, exist_ok=True)
+        metrics = evaluator.evaluate(results_df, save_results=True)
             
         logger.info("实验完成。")
-        logger.info(f"指标: {json.dumps(final_metrics, indent=2)}")
+        logger.info(f"指标: {json.dumps(metrics['overall'], indent=2)}")

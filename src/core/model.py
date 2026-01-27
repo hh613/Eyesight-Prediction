@@ -3,6 +3,7 @@ import numpy as np
 import logging
 from typing import Dict, Any
 from src.core.config import Config
+import os
 
 # 尝试导入模型，如果未安装则处理
 try:
@@ -33,6 +34,8 @@ class ResidualRegressor:
         # 复制参数，避免修改原始配置
         model_params = params.copy()
         
+        logger.info(f"正在初始化残差回归模型: {m_type}")
+        
         # 如果参数中包含 'learning_rate' 且模型不是 boosting，则移除
         # RandomForest 不支持 learning_rate
         if 'learning_rate' in model_params and m_type == 'random_forest':
@@ -41,6 +44,7 @@ class ResidualRegressor:
         if m_type == "xgboost":
             if xgb is None:
                 logger.warning("未安装 XGBoost，回退到 Random Forest")
+                logger.info("最终使用的模型: Random Forest (Fallback)")
                 # 回退时也要清理不兼容参数
                 if 'learning_rate' in model_params:
                     del model_params['learning_rate']
@@ -60,19 +64,24 @@ class ResidualRegressor:
                     # model_params['tree_method'] = 'hist' # XGBoost 2.0+ 自动选择，显式设置device即可
             except ImportError:
                 pass
-                
+            
+            logger.info(f"最终使用的模型: XGBoost (Params: {model_params})")
             return xgb.XGBRegressor(**model_params)
             
         elif m_type == "lightgbm":
             if lgb is None:
                 logger.warning("未安装 LightGBM，回退到 Random Forest")
+                logger.info("最终使用的模型: Random Forest (Fallback)")
                 # 回退时也要清理不兼容参数
                 if 'learning_rate' in model_params:
                     del model_params['learning_rate']
                 return RandomForestRegressor(**model_params)
+            
+            logger.info(f"最终使用的模型: LightGBM (Params: {model_params})")
             return lgb.LGBMRegressor(**model_params)
             
         elif m_type == "random_forest":
+            logger.info(f"最终使用的模型: Random Forest (Params: {model_params})")
             return RandomForestRegressor(**model_params)
             
         else:
@@ -90,14 +99,13 @@ class ResidualRegressor:
         
         X = X_df[self.feature_cols].copy()
         
-        # 确保所有 object 类型的列转换为 category (针对 XGBoost/LightGBM)
-        for col in X.columns:
-            if X[col].dtype == 'object':
-                X[col] = X[col].astype('category')
-                
-        logger.info(f"正在使用特征训练模型: {self.feature_cols}")
+        # 自动进行 One-Hot Encoding 以支持 RandomForest 等不支持分类特征的模型
+        X_encoded = pd.get_dummies(X)
+        self.encoded_feature_cols = X_encoded.columns.tolist()
         
-        self.model.fit(X, y)
+        logger.info(f"正在使用特征训练模型: {self.feature_cols} (编码后维度: {len(self.encoded_feature_cols)})")
+        
+        self.model.fit(X_encoded, y)
 
     def predict(self, X_df: pd.DataFrame) -> np.ndarray:
         """
@@ -109,9 +117,16 @@ class ResidualRegressor:
         # 确保列匹配
         X = X_df[self.feature_cols].copy()
         
-        # 同样需要转换类型
-        for col in X.columns:
-            if X[col].dtype == 'object':
-                X[col] = X[col].astype('category')
-                
-        return self.model.predict(X)
+        # One-Hot Encoding
+        X_encoded = pd.get_dummies(X)
+        
+        # 对齐列 (Align Columns)
+        # 1. 创建一个全 0 的 DataFrame，列为训练时的列
+        X_final = pd.DataFrame(0, index=X_encoded.index, columns=self.encoded_feature_cols)
+        
+        # 2. 将存在的列的值填入
+        # 仅保留在训练中出现的列
+        common_cols = [c for c in X_encoded.columns if c in self.encoded_feature_cols]
+        X_final[common_cols] = X_encoded[common_cols]
+        
+        return self.model.predict(X_final)

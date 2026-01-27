@@ -1,6 +1,7 @@
 import pandas as pd
 import numpy as np
 import logging
+import os
 from typing import List, Dict
 from src.core.config import Config
 from src.core.arima import ArimaForecaster
@@ -73,6 +74,22 @@ class RecursiveForecaster:
             for col in self.config.columns.timevarying_cols:
                 feat_dict[col] = input_row[col]
                 
+                # 同步计算 ARIMA 外推特征 (用于推理时的特征一致性)
+                # 基于 current_history 预测下一时刻 (step+1) 的特征? 
+                # 不，这里的逻辑是: 我们正在预测 step (即 T+step)。
+                # ML 模型需要 X_{T+step-1} 来预测 Residual_{T+step}。
+                # X_{T+step-1} 包含了 T+step-1 时刻的状态。
+                # 在 data.build 中，我们为 X_t 添加了 {col}_arima_next，这是基于 0...t 预测的 t+1 的特征。
+                # 所以在这里，我们需要基于 current_history (它已经包含到了 T+step-1) 预测 T+step 的特征。
+                
+                if col != self.config.columns.target_col:
+                    try:
+                        # 注意: predict_feature_next 返回的是下一步的预测
+                        val_arima = self.arima.predict_feature_next(current_history, col, steps=1)[0]
+                        feat_dict[f"{col}_arima_next"] = val_arima
+                    except:
+                        feat_dict[f"{col}_arima_next"] = 0.0
+
             # 动态特征
             feat_dict.update(dynamic_feats)
             
@@ -87,11 +104,26 @@ class RecursiveForecaster:
             # 创建 X DataFrame
             X_input = pd.DataFrame([feat_dict])
             
-            # 3. 残差预测
-            residual_pred = self.residual_model.predict(X_input)[0]
-            
-            # 4. 最终预测
-            y_final = y_arima + residual_pred
+            # 3. 预测 (根据配置选择 Residual 或 Direct)
+            if self.config.experiment.learning_target == "direct":
+                # Direct Forecasting
+                # 如果训练时使用了 y_arima_next 作为特征，这里需要确保 X_input 中包含它
+                # 我们在上面 feat_dict 中并没有显式添加 'y_arima_next'
+                # 让我们加上它 (target 的 ARIMA 预测)
+                feat_dict['y_arima_next'] = y_arima
+                
+                # 更新 X_input
+                X_input = pd.DataFrame([feat_dict])
+                
+                # 模型直接输出 y_pred
+                direct_pred = self.residual_model.predict(X_input)[0]
+                y_final = direct_pred
+                residual_pred = 0.0 # 这种模式下没有残差概念，或者说 residual = y_final - y_arima (为了兼容记录)
+            else:
+                # Residual Forecasting (Default)
+                # 模型输出 residual
+                residual_pred = self.residual_model.predict(X_input)[0]
+                y_final = y_arima + residual_pred
             
             # 5. 准备下一步 (T+step) 的状态
             # 我们需要向 current_history 追加一行，代表 T+step 的预测状态
@@ -115,6 +147,11 @@ class RecursiveForecaster:
                     continue # 已经做过
                 
                 # 预测特征值
+                # 注意: 我们需要基于 current_history 预测 T+step 的特征值。
+                # 实际上 predict_feature_next(history, steps=1) 预测的是 history 之后的一步。
+                # current_history 此时包含 [0...T+step-1] (因为我们在循环开始时追加了 T+step-1 的预测)
+                # 所以调用 predict_feature_next 会返回 T+step 的预测值。
+                
                 feat_val = self.arima.predict_feature_next(current_history, col, steps=1)[0]
                 new_row[col] = feat_val
                 

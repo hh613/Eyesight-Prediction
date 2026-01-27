@@ -1,6 +1,7 @@
 import pandas as pd
 import numpy as np
 import logging
+import os
 from tqdm import tqdm
 from src.core.config import Config
 from src.models.arima.arima_forecaster import ArimaForecaster
@@ -87,6 +88,7 @@ class ArimaUnivariateBaseline:
         
         # 评估
         evaluator = Evaluator(self.config, output_dir)
+        os.makedirs(output_dir, exist_ok=True)
         metrics = evaluator.evaluate(pred_df, save_results=True)
         
         logger.info(f"ARIMA Baseline 完成。Metrics: {metrics['overall']}")

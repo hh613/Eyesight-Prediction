@@ -1,12 +1,6 @@
 import pandas as pd
 import numpy as np
 from src.preprocessing import mapper
-# 尝试导入 arima filter，如果尚未实现则忽略
-try:
-    from src.models.arima_filter import ARIMATrendFilter
-    HAS_ARIMA = True
-except ImportError:
-    HAS_ARIMA = False
 
 class FeatureEngineer:
     def __init__(self):
@@ -14,7 +8,7 @@ class FeatureEngineer:
 
     def transform(self, df):
         """
-        特征工程主流程 (简化版 - 方案A)
+        特征工程主流程
         只负责基础清洗、重命名、静态映射和基础时间计算 (delta_t)。
         复杂的动态特征 (ARIMA, Rolling Stats, WMA) 移交给 src/core 在实验阶段动态计算。
         """

@@ -39,17 +39,13 @@ class WindowDataset(Dataset):
 class LSTMUnivariateBaseline:
     def __init__(self, config: Config):
         self.config = config
-        # 从配置读取超参，如果没有则使用默认值
-        self.hidden_size = 64
-        self.num_layers = 2
-        self.epochs = 20
-        self.lr = 0.001
-        self.batch_size = 64
-        self.window_size = 3
-        
-        # 尝试从 config.model.model_params 读取 (如果有配置的话)
-        # 这里假设用户可能会在 yaml 里加一个 lstm section，或者复用 model_params
-        # 为了简单，我们硬编码默认值，但允许扩展
+        # 从配置读取超参
+        self.hidden_size = config.lstm.hidden_size
+        self.num_layers = config.lstm.num_layers
+        self.epochs = config.lstm.epochs
+        self.lr = config.lstm.learning_rate
+        self.batch_size = config.lstm.batch_size
+        self.window_size = config.lstm.window_size
         
         # GPU 检测
         self.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
@@ -207,6 +203,7 @@ class LSTMUnivariateBaseline:
         pred_df = pd.DataFrame(predictions)
         
         evaluator = Evaluator(self.config, output_dir)
+        os.makedirs(output_dir, exist_ok=True)
         metrics = evaluator.evaluate(pred_df, save_results=True)
         
         logger.info(f"LSTM Baseline 完成。Metrics: {metrics['overall']}")
